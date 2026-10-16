@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /limon/admin.html
+Disallow: /limon/test-panel.html
+Disallow: /limon/prototype-v0/
+Allow: /
+
+Sitemap: https://routermurti.github.io/limon/sitemap.xml

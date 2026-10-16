@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#101310">
+<title>Limon | Güvenlik Test Paneli</title>
+<style>
+:root{color-scheme:dark;--bg:#101310;--panel:#191f1a;--line:#354237;--text:#f5f4ed;--muted:#aab5aa;--gold:#e8c78b;--green:#77d6a0;--red:#ff9292;--yellow:#f3d47f}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--text);font:15px/1.6 system-ui,sans-serif}
+main{max-width:1150px;margin:auto}
+h1{color:var(--gold);margin-bottom:5px}
+h2{font-size:18px;margin-top:24px}
+.muted,footer{color:var(--muted)}
+.panel{padding:22px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin:18px 0}
+input{display:block;width:100%;padding:12px;margin:8px 0 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+button{border:0;border-radius:8px;padding:11px 16px;margin:4px 6px 4px 0;background:var(--gold);color:#191b15;font:inherit;font-weight:700;cursor:pointer}
+button.secondary{background:#303b32;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:wait}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.result{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0;overflow-wrap:anywhere}
+.result strong{display:block;margin-bottom:5px}
+.status{font-weight:700}
+.ok{color:var(--green)}
+.fail{color:var(--red)}
+.warn{color:var(--yellow)}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font:13px/1.5 ui-monospace,monospace}
+.hidden{display:none!important}
+#message{overflow-wrap:anywhere}
+footer{font-size:13px}
+#extra-results .result{min-width:0}
+#event-filter{max-width:340px;width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:10px;border-radius:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Limon Güvenlik Test Paneli</h1>
+<p class="muted">Yönetici denetimi ve salt okunur canlı güvenlik kontrolleri. Ön kayıt, satış ve ödeme işlemleri açılmaz.</p>
+
+<section id="login-panel" class="panel">
+<h2>Yönetici girişi</h2>
+<form id="login-form">
+<label for="email">Yönetici e-postası</label>
+<input id="email" type="email" autocomplete="username" required>
+<label for="password">Şifre</label>
+<input id="password" type="password" autocomplete="current-password" required>
+<button id="login-button" type="submit">Giriş yap</button>
+</form>
+<p id="login-message" role="status"></p>
+</section>
+
+<section id="dashboard" class="hidden">
+<div class="panel">
+<div class="grid">
+<div><strong>Oturum</strong><div id="session-status" class="status">Bekleniyor</div></div>
+<div><strong>Yönetici yetkisi</strong><div id="admin-status" class="status">Bekleniyor</div></div>
+</div>
+<p id="user-email" class="muted"></p>
+<button id="run-audit">Tüm kontrolleri çalıştır</button>
+<button id="download-report" class="secondary">JSON raporu indir</button>
+<button id="copy-summary" class="secondary">Tüm sonuçları kopyala</button>
+<button id="logout" class="secondary">Çıkış yap</button>
+<p id="message" role="status"></p>
+</div>
+
+<h2>Veritabanı kontrolleri</h2>
+<div id="results" class="grid"></div>
+<h2>RLS ve erişim güvenliği</h2>
+<div id="security-results" class="grid"></div>
+<h2>İndeks kontrolleri</h2>
+<div id="index-results" class="grid"></div>
+<h2>Canlı güvenlik testleri</h2>
+<div id="live-results" class="grid"></div>
+<h2>Ek kontroller</h2>
+<div id="static-results" class="grid"></div>
+<h2>Site, görsel ve erişilebilirlik kontrolleri</h2>
+<div id="extra-results" class="grid"></div>
+
+<section class="panel">
+<h2>Denetim ayrıntıları</h2>
+<pre id="details">Henüz denetim yapılmadı.</pre>
+<button id="copy-results" class="secondary">Sonuçları kopyala</button>
+</section>
+</section>
+
+<footer>Limon · Geçici güvenlik test paneli · Gizli anahtarlar tarayıcıda tutulmaz.</footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+'use strict';
+
+const SUPABASE_URL='https://neudpyltwgimilmjszwp.supabase.co';
+const SUPABASE_KEY='sb_publishable_gJU2Ei21YYlXINBqxg_w_w_kJt0k3PW';
+const SITE_URL='https://routermurti.github.io/limon/';
+const FUNCTION_URL=SUPABASE_URL+'/functions/v1/limon-pre-register';
+
+const clientOptions={
+  auth:{
+    persistSession:false,
+    autoRefreshToken:false,
+    detectSessionInUrl:false
+  }
+};
+
+const db=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,clientOptions);
+const anonDb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,clientOptions);
+const $=id=>document.getElementById(id);
+const containers=['results','security-results','index-results','live-results','static-results','extra-results'];
+
+let running=false;
+let auditLog=[];
+let structuredResults=[];
+let verifiedUserId=null;
+let authGeneration=0;
+
+function card(container,title,status,detail,type='warn'){
+  if(!verifiedUserId)return;
+  const root=document.createElement('div');
+  root.className='result';
+  const heading=document.createElement('strong');
+  heading.textContent=title;
+  const state=document.createElement('div');
+  state.className='status '+type;
+  state.textContent=status;
+  const description=document.createElement('p');
+  description.className='muted';
+  description.textContent=detail;
+  root.append(heading,state,description);
+  $(container).append(root);
+  structuredResults.push({category:container,title,status,detail,level:type,time:new Date().toISOString()});
+}
+
+function log(message){
+  if(!verifiedUserId)return;
+  auditLog.push(String(message));
+  $('details').textContent=auditLog.join('\n');
+}
+
+function clearResults(){
+  containers.forEach(id=>$(id).replaceChildren());
+  auditLog=[];
+  structuredResults=[];
+  $('details').textContent='Denetim başlatıldı.';
+}
+
+function errorText(error){
+  return error?.message||String(error||'Bilinmeyen hata');
+}
+
+function hideDashboard(message=''){
+  authGeneration++;
+  verifiedUserId=null;
+  $('dashboard').classList.add('hidden');
+  $('login-panel').classList.remove('hidden');
+  $('session-status').textContent='Oturum kapalı';
+  $('session-status').className='status';
+  $('admin-status').textContent='Kontrol edilmedi';
+  $('admin-status').className='status';
+  $('user-email').textContent='';
+  $('message').textContent='';
+  clearResults();
+  $('details').textContent='Oturum doğrulanmadı.';
+  if(message)$('login-message').textContent=message;
+}
+
+
+async function countRows(query){
+  const {count,error}=await query;
+  if(error)throw error;
+  if(typeof count!=='number')throw new Error('Kayıt sayısı alınamadı.');
+  return count;
+}
+
+async function databaseChecks(){
+  const checks=[
+    {name:'Aktif ön kayıtlar',query:()=>db.from('limon_pre_registrations').select('id',{count:'exact',head:true}).is('cancelled_at',null)},
+    {name:'İptal edilmiş kayıtlar',query:()=>db.from('limon_pre_registrations').select('id',{count:'exact',head:true}).not('cancelled_at','is',null)},
+    {name:'Siparişler',query:()=>db.from('limon_orders').select('*',{count:'exact',head:true})},
+    {name:'Aktif paketler',query:()=>db.from('limon_packages').select('*',{count:'exact',head:true}).eq('is_active',true)},
+    {name:'Pasif paketler',query:()=>db.from('limon_packages').select('*',{count:'exact',head:true}).eq('is_active',false)}
+  ];
+
+  for(const item of checks){
+    try{
+      const count=await countRows(item.query());
+      const requiresZero=item.name==='Siparişler'||item.name==='Aktif paketler';
+      const type=requiresZero&&count!==0?'fail':'ok';
+      card('results',item.name,`${count} kayıt`,requiresZero&&count!==0?'Beklenen kapalı durumdan farklı.':'Veritabanından okundu.',type);
+      log(`${item.name}: ${count}`);
+    }catch(error){
+      card('results',item.name,'HATA',errorText(error),'fail');
+      log(`${item.name}: HATA ${errorText(error)}`);
+    }
+  }
+
+  const tokens=[
+    ['İptal tokenı','cancellation_token_hash'],
+    ['İptal süresi','cancellation_expires_at'],
+    ['Doğrulama tokenı','verification_token_hash'],
+    ['Doğrulama süresi','verification_expires_at']
+  ];
+
+  for(const [name,column] of tokens){
+    try{
+      const count=await countRows(
+        db.from('limon_pre_registrations')
+          .select('id',{count:'exact',head:true})
+          .not('cancelled_at','is',null)
+          .not(column,'is',null)
+      );
+      card('results',`İptal edilmiş kayıt · ${name}`,count===0?'TEMİZ':`${count} BULGU`,count===0?'İptal edilmiş kayıtlarda alan boş.':'İptal edilmiş kayıtlarda veri kalmış.',count===0?'ok':'fail');
+      log(`İptal edilmiş kayıt ${name}: ${count}`);
+    }catch(error){
+      card('results',`İptal edilmiş kayıt · ${name}`,'HATA',errorText(error),'fail');
+      log(`${name}: HATA ${errorText(error)}`);
+    }
+  }
+}
+
+async function securityChecks(){
+  const {data:adminRpc,error:adminRpcError}=await db.rpc('limon_is_admin');
+  const adminRpcOk=!adminRpcError&&adminRpc===true;
+  card('security-results','Yönetici doğrulama RPC',adminRpcOk?'GEÇTİ':'HATA',adminRpcOk?'Authenticated yönetici RPC tarafından doğrulandı.':'RPC eksik, yetkisiz veya yönetici sonucu false.',adminRpcOk?'ok':'fail');
+  if(!adminRpcOk)throw new Error('limon_is_admin RPC doğrulanamadı.');
+  const {data:audit,error}=await db.rpc('limon_security_audit');
+  if(error)throw error;
+  if(!audit||typeof audit!=='object')throw new Error('Güvenlik denetimi geçersiz sonuç döndürdü.');
+
+  const expected=[
+    'limon_admins','limon_announcements','limon_orders',
+    'limon_packages','limon_pre_registrations','limon_signup_limits',
+    'limon_work_sessions','limon_work_summary',
+    'limon_finance_entries','limon_finance_summary'
+  ];
+  const rls=Array.isArray(audit.rls)?audit.rls:[];
+  const policies=Array.isArray(audit.policies)?audit.policies:[];
+  const grants=Array.isArray(audit.grants)?audit.grants:[];
+  const indexes=Array.isArray(audit.indexes)?audit.indexes:[];
+
+  log('');
+  log('SUNUCU TARAFI GÜVENLİK DENETİMİ');
+
+  for(const table of expected){
+    const record=rls.find(item=>item.table===table);
+    const enabled=record?.enabled===true;
+    card('security-results',`RLS · ${table}`,enabled?'AKTİF':'KAPALI / BULUNAMADI',record?`FORCE RLS: ${record.forced?'Açık':'Kapalı'}`:'Tablo denetim sonucunda bulunamadı.',enabled?'ok':'fail');
+    log(`RLS ${table}: ${enabled?'AKTİF':'HATA'}`);
+  }
+
+  const writes=new Set(['INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']);
+  const anonWrites=grants.filter(item=>(item.role==='anon'||item.role==='public')&&writes.has(item.privilege));
+  const authWrites=grants.filter(item=>item.role==='authenticated'&&writes.has(item.privilege));
+  const limitGrants=grants.filter(item=>item.table==='limon_signup_limits');
+
+  card('security-results','Anonim/PUBLIC yazma yetkileri',anonWrites.length===0?'YOK':`${anonWrites.length} BULGU`,anonWrites.length===0?'Anonim ve PUBLIC doğrudan yazma yetkisi görünmüyor.':anonWrites.map(item=>`${item.table}: ${item.privilege}`).join(', '),anonWrites.length===0?'ok':'fail');
+
+  card('security-results','Authenticated yazma yetkileri',`${authWrites.length} YETKİ`,authWrites.length?authWrites.map(item=>`${item.table}: ${item.privilege}`).join(', '):'Doğrudan yazma yetkisi görünmüyor.',authWrites.length?'warn':'ok');
+
+  card('security-results','Hız sınırı tablosu erişimi',limitGrants.length===0?'İSTEMCİ YETKİSİ YOK':`${limitGrants.length} YETKİ`,'anon ve authenticated tablo yetkileri denetlendi.',limitGrants.length===0?'ok':'fail');
+
+  card('security-results','RLS politikaları',`${policies.length} POLİTİKA`,'Tanımlar sunucudan okundu; erişim davranışı ayrıca test edilir.',policies.length?'ok':'warn');
+
+  log(`RLS politika sayısı: ${policies.length}`);
+  log(`Anonim/PUBLIC yazma yetkileri: ${anonWrites.length}`);
+  log(`Authenticated yazma yetkileri: ${authWrites.length}`);
+  log(`Hız sınırı istemci yetkileri: ${limitGrants.length}`);
+
+  const unique=indexes.find(item=>
+    item.name==='limon_pre_registrations_email_unique'&&
+    /CREATE UNIQUE INDEX/i.test(item.definition||'')&&
+    /lower\s*\(/i.test(item.definition||'')
+  );
+  const duplicate=indexes.find(item=>item.name==='limon_pre_reg_email_idx');
+  const primary=indexes.find(item=>item.name==='limon_pre_registrations_pkey');
+
+  card('index-results','Benzersiz e-posta indeksi',unique?'MEVCUT':'DOĞRULANAMADI',unique?.name||'Beklenen indeks doğrulanamadı.',unique?'ok':'fail');
+  card('index-results','Eski yinelenen indeks',duplicate?'HALA MEVCUT':'KALDIRILMIŞ',duplicate?.name||'Yinelenen indeks bulunmuyor.',duplicate?'fail':'ok');
+  card('index-results','Birincil anahtar indeksi',primary?'MEVCUT':'EKSİK',primary?.name||'Birincil anahtar indeksi bulunamadı.',primary?'ok':'fail');
+
+  log(`Benzersiz e-posta indeksi: ${unique?'MEVCUT':'HATA'}`);
+  log(`Eski indeks: ${duplicate?'MEVCUT':'KALDIRILMIŞ'}`);
+  log(`Birincil anahtar indeksi: ${primary?'MEVCUT':'EKSİK'}`);
+
+  for(const policy of policies){
+    log(`POLİTİKA ${policy.table}.${policy.name} [${policy.command}] ROLLER=${JSON.stringify(policy.roles)} USING=${policy.using??'NULL'} CHECK=${policy.check??'NULL'}`);
+  }
+
+  log(`Denetim zamanı: ${audit.checked_at||'Bilinmiyor'}`);
+}
+
+async function anonSelectTest(table){
+  try{
+    const {data,error}=await anonDb.from(table).select('*').limit(1);
+    if(error){
+      const denied=error.code==='42501'||/permission denied|not authorized/i.test(error.message);
+      card('live-results',`Anonim okuma · ${table}`,denied?'ERİŞİM ENGELLENDİ':'ERİŞİM HATASI',error.message,denied?'ok':'warn');
+      log(`Anonim ${table}: ${denied?'ENGELLENDİ':'HATA'} ${error.message}`);
+      return;
+    }
+    if(Array.isArray(data)&&data.length>0){
+      card('live-results',`Anonim okuma · ${table}`,'VERİ GÖRÜLEBİLİYOR','Anonim oturum en az bir kayıt okuyabildi.','fail');
+      log(`Anonim ${table}: VERİ GÖRÜLEBİLİYOR`);
+    }else{
+      card('live-results',`Anonim okuma · ${table}`,'KAYIT DÖNMEDİ','Boş sorgu tek başına RLS korumasını kanıtlamaz.','warn');
+      log(`Anonim ${table}: KAYIT DÖNMEDİ`);
+    }
+  }catch(error){
+    card('live-results',`Anonim okuma · ${table}`,'TEST HATASI',errorText(error),'warn');
+    log(`Anonim ${table}: TEST HATASI ${errorText(error)}`);
+  }
+}
+
+function classifyRpcError(error){
+  const code=String(error?.code||'').toUpperCase();
+  const message=String(error?.message||'');
+  if(code==='42501'||/permission denied|insufficient privilege|not authorized/i.test(message))return 'denied';
+  if(code==='PGRST202'||code==='42883'||/could not find.{0,40}function|function.{0,80}does not exist/i.test(message))return 'missing';
+  return 'unknown';
+}
+
+function showAnonRpcError(title,error){
+  const kind=classifyRpcError(error);
+  const status=kind==='denied'?'ERİŞİM ENGELLENDİ':kind==='missing'?'RPC BULUNAMADI':'DOĞRULANAMADI';
+  const detail=kind==='denied'?'Anonim rol için EXECUTE yetkisi engellendi.':kind==='missing'?'RPC migration’ı eksik veya şema önbelleğinde görünmüyor.':'API/auth hatası; bu sonuç erişim kuralını kanıtlamaz.';
+  card('live-results',title,status,detail,kind==='denied'?'ok':kind==='missing'?'fail':'warn');
+  log(`${title}: ${kind.toUpperCase()} (${error?.code||'kodsuz hata'})`);
+}
+
+async function anonRpcTest(){
+  try{
+    const {data,error}=await anonDb.rpc('limon_security_audit');
+    if(error){
+      showAnonRpcError('Anonim güvenlik denetimi RPC',error);
+      return;
+    }
+    card('live-results','Anonim güvenlik denetimi RPC','KRİTİK BULGU','Anonim rol admin güvenlik denetimi RPC’sini çağırabildi.','fail');
+    log('Anonim güvenlik RPC: BEKLENMEYEN BAŞARILI YANIT');
+  }catch(error){
+    card('live-results','Anonim güvenlik denetimi RPC','TEST HATASI',errorText(error),'warn');
+    log(`Anonim RPC: TEST HATASI ${errorText(error)}`);
+  }
+}
+
+async function anonAdminFunctionTest(){
+  try{
+    const {data,error}=await anonDb.rpc('limon_is_admin');
+    if(error){
+      showAnonRpcError('Anonim yönetici doğrulaması RPC',error);
+      return;
+    }
+    card('live-results','Anonim yönetici doğrulaması RPC','KRİTİK BULGU',data===true?'Anonim oturum yönetici olarak tanındı.':'Anonim rol yönetici doğrulama RPC’sini çağırabildi.','fail');
+    log('Anonim limon_is_admin: RPC anonim role açık');
+  }catch(error){
+    card('live-results','Anonim yönetici doğrulaması','TEST HATASI',errorText(error),'warn');
+    log(`Anonim limon_is_admin: ${errorText(error)}`);
+  }
+}
+
+function anonRateLimitPermissionTest(){
+  card('live-results','Hız sınırı RPC','CANLI ÇAĞRI YAPILMADI','Sayaç değiştirmemek için limon_signup_rate_limit çağrılmadı. EXECUTE yetkisi ayrıca denetlenmeli.','warn');
+  log('Hız sınırı RPC: sayaç değiştiren test yapılmadı.');
+}
+
+// Use an allowed request header to trigger browser preflight.
+async function edgePreflightTest(){
+  const title='Edge Function CORS ön kontrolü';
+  try{
+    const response=await fetch(FUNCTION_URL,{
+      method:'GET',
+      mode:'cors',
+      cache:'no-store',
+      redirect:'manual',
+      headers:{
+        'Content-Type':'application/json'
+      }
+    });
+
+    const opaque=response.type==='opaqueredirect';
+
+    card(
+      'live-results',
+      title,
+      opaque?'YÖNLENDİRME ALGILANDI':'CORS İSTEĞİ TAMAMLANDI',
+      opaque
+        ? 'Tarayıcı ön kontrolü geçildi; yönlendirme hedefi güvenlik nedeniyle gizlendi.'
+        : `HTTP ${response.status}; yanıt türü: ${response.type}.`,
+      'ok'
+    );
+
+    log(
+      opaque
+        ? 'Edge Function preflight: GEÇTİ; yönlendirme algılandı'
+        : `Edge Function preflight: GEÇTİ; HTTP ${response.status}; type=${response.type}`
+    );
+  }catch(error){
+    card(
+      'live-results',
+      title,
+      'CORS / AĞ HATASI',
+      `${errorText(error)}. Tarayıcı ön kontrolü veya GET isteği başarısız oldu.`,
+      'warn'
+    );
+    log(`Edge Function preflight: DOĞRULANAMADI ${errorText(error)}`);
+  }
+}
+
+// Do not follow cross-origin redirects when checking malformed tokens.
+async function invalidTokenTest(){
+  const tests=[
+    ['Geçersiz doğrulama bağlantısı','?token=invalid'],
+    ['Geçersiz iptal bağlantısı','?cancel=invalid']
+  ];
+
+  for(const [name,path] of tests){
+    try{
+      const response=await fetch(FUNCTION_URL+path,{
+        method:'GET',
+        mode:'cors',
+        redirect:'manual',
+        cache:'no-store'
+      });
+
+      if(response.type==='opaqueredirect'){
+        card(
+          'live-results',
+          name,
+          'YÖNLENDİRME ALGILANDI',
+          'Tarayıcı HTTP durumunu ve hedefi gizliyor. Tokenın reddedildiği yalnız bu sonuçla doğrulanamaz.',
+          'warn'
+        );
+        log(`${name}: YÖNLENDİRME ALGILANDI; HTTP ve hedef gizli`);
+        continue;
+      }
+
+      const status=response.status;
+      const rejected=status===400||status===401||status===403||status===404||status===422;
+
+      card(
+        'live-results',
+        name,
+        rejected?'GEÇERSİZ İSTEK REDDEDİLDİ':'HTTP YANITI ALINDI',
+        `HTTP ${status}; yanıt türü: ${response.type}.`,
+        rejected?'ok':'warn'
+      );
+
+      log(`${name}: HTTP ${status}; type=${response.type}`);
+    }catch(error){
+      card(
+        'live-results',
+        name,
+        'TARAYICIDA DOĞRULANAMADI',
+        `${errorText(error)}. CORS veya ağ engeli olabilir.`,
+        'warn'
+      );
+      log(`${name}: TARAYICIDA DOĞRULANAMADI ${errorText(error)}`);
+    }
+  }
+}
+
+async function frontendConfigTest(){
+  try{
+    const response=await fetch(SITE_URL+'index.html?audit='+Date.now(),{
+      method:'GET',
+      cache:'no-store'
+    });
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+
+    const html=await response.text();
+    const preregMatch=html.match(/\b(?:const|let|var)\s+PREREG_ENABLED\s*=\s*(true|false)\b/);
+    const disabled=preregMatch&&preregMatch[1]==='false';
+
+    card('live-results','Canlı site · Ön kayıt ayarı',disabled?'KAPALI':'DOĞRULANAMADI / AÇIK',preregMatch?`PREREG_ENABLED = ${preregMatch[1]}`:'Beklenen sabit tanımı bulunamadı. Alternatif kod yapısı olabilir.',disabled?'ok':'warn');
+    log('Canlı ön kayıt ayarı: '+(preregMatch?preregMatch[1]:'BULUNAMADI'));
+
+    const forbidden=['06','08','09','12'];
+    const galleryArray=html.match(/(?:galleryImages|galleryPhotos|gallery|photos)\s*=\s*\[([\s\S]*?)\]/i);
+
+    if(galleryArray){
+      const values=galleryArray[1].split(',').map(value=>value.trim().replace(/['"]/g,''));
+      const unwanted=forbidden.filter(num=>values.some(value=>
+        value===String(Number(num))||
+        value===num||
+        new RegExp(`(?:^|[^0-9])${num}(?:[^0-9]|$)`).test(value)
+      ));
+
+      card('live-results','Galeri yasaklı fotoğraflar',unwanted.length?'BULGU':'LİSTEDE BULUNMADI',unwanted.length?`Bulunan: ${unwanted.join(', ')}`:'06, 08, 09, 12 değerleri algılanan galeri listesinde bulunmadı.',unwanted.length?'fail':'ok');
+      log(`Galeri kontrolü: ${unwanted.length?unwanted.join(', '):'TEMİZ'}`);
+    }else{
+      card('live-results','Galeri yasaklı fotoğraflar','OTOMATİK DOĞRULANAMADI','Galeri veri yapısı algılanamadı; kaynak kod incelemesi gerekiyor.','warn');
+      log('Galeri kontrolü: DOĞRULANAMADI');
+    }
+  }catch(error){
+    card('live-results','Canlı site kaynak kontrolü','HATA',errorText(error),'warn');
+    log(`Canlı site kontrolü: ${errorText(error)}`);
+  }
+}
+
+async function publicPackageTest(){
+  try{
+    const {data,error}=await anonDb.from('limon_packages').select('id,is_active').limit(100);
+    if(error)throw error;
+    const active=(data||[]).filter(item=>item.is_active===true);
+    card('live-results','Anonim görülebilen aktif paketler',active.length===0?'0 AKTİF':`${active.length} AKTİF`,active.length===0?'Anonim oturum aktif paket görmüyor.':'Aktif paket bulundu; satışın kapalı kalması ayrıca doğrulanmalı.',active.length===0?'ok':'fail');
+    log(`Anonim aktif paket: ${active.length}`);
+  }catch(error){
+    card('live-results','Anonim paket kontrolü','HATA',errorText(error),'warn');
+    log(`Anonim paket kontrolü: ${errorText(error)}`);
+  }
+}
+
+async function liveChecks(){
+  log('');
+  log('CANLI GÜVENLİK TESTLERİ');
+
+  for(const table of [
+    'limon_admins','limon_orders',
+    'limon_pre_registrations','limon_signup_limits',
+    'limon_work_sessions','limon_finance_entries'
+  ]){
+    await anonSelectTest(table);
+  }
+
+  await anonRpcTest();
+  await anonAdminFunctionTest();
+  anonRateLimitPermissionTest();
+  await edgePreflightTest();
+  await invalidTokenTest();
+  await frontendConfigTest();
+  await publicPackageTest();
+
+  card('static-results','Normal kullanıcı RLS testi','AYRI OTURUM GEREKLİ','Anonim erişim test edildi. Yönetici olmayan authenticated kullanıcının erişimi bu oturumda test edilmedi.','warn');
+  card('static-results','Hız sınırı 429 davranışı','TEST EDİLMEDİ','Gerçek kayıt/iptal istekleri ve sayaç değişiklikleri gerektirdiği için otomatik çalıştırılmadı.','warn');
+  card('static-results','Satış ve ödeme akışları','UÇTAN UCA DOĞRULANMADI','Aktif paketler ve mevcut siparişler kontrol edildi. Ödeme uç noktalarının tamamı bu panelden doğrulanamaz.','warn');
+  card('static-results','İptal isteği kötüye kullanım koruması','KOD İNCELEMESİ GEREKLİ','Turnstile, hız sınırı ve e-posta gönderim korumaları Edge Function kodunda ayrıca incelenmeli.','warn');
+}
+
+
+// Supplemental read-only checks. Original RLS, RPC, index and live checks remain intact.
+async function extraFetch(url,timeoutMs=9000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(url,{method:'GET',cache:'no-store',signal:controller.signal});}
+  finally{clearTimeout(timer);}
+}
+async function extraPageCheck(name,path,expected=''){
+  try{
+    const response=await extraFetch(SITE_URL+path);
+    if(!response.ok){card('extra-results',name,'HTTP '+response.status,'Sayfa isteği başarısız.','warn');return;}
+    const content=await response.text();
+    const found=!expected||content.toLocaleLowerCase('tr').includes(expected.toLocaleLowerCase('tr'));
+    card('extra-results',name,found?'ERİŞİLEBİLİR':'İÇERİK DOĞRULANAMADI',`HTTP ${response.status}; beklenen içerik: ${expected||'aranmadı'}`,found?'ok':'warn');
+  }catch(error){card('extra-results',name,'DOĞRULANAMADI',errorText(error),'warn');}
+}
+async function extraMetadataCheck(){
+  try{
+    const response=await extraFetch(SITE_URL+'index.html');
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const html=await response.text();
+    const documentTree=new DOMParser().parseFromString(html,'text/html');
+    const tags=['og:title','og:description','og:image'];
+    const missing=tags.filter(tag=>!documentTree.querySelector(`meta[property="${tag}"]`)?.content);
+    card('extra-results','Sosyal medya paylaşım etiketleri',missing.length?'EKSİK':'MEVCUT',missing.length?missing.join(', '):'Temel Open Graph etiketleri bulundu.',missing.length?'warn':'ok');
+    const favicon=!!documentTree.querySelector('link[rel~="icon"]');
+    card('extra-results','Favicon',favicon?'MEVCUT':'BULUNAMADI','Canlı HTML içindeki ikon bağlantısı.',favicon?'ok':'warn');
+    const viewport=!!documentTree.querySelector('meta[name="viewport"]');
+    card('extra-results','Mobil viewport',viewport?'MEVCUT':'BULUNAMADI','Mobil görünüm için viewport etiketi.',viewport?'ok':'warn');
+    const images=[...documentTree.querySelectorAll('img')];
+    const withoutAlt=images.filter(img=>!img.hasAttribute('alt')).length;
+    card('extra-results','Görsel erişilebilirliği',withoutAlt?'İNCELEME GEREKLİ':'ALT ETİKETLERİ MEVCUT',`${images.length} img etiketi; alt özelliği olmayan: ${withoutAlt}. Dinamik görseller dahil değildir.`,withoutAlt?'warn':'ok');
+  }catch(error){card('extra-results','Site meta denetimi','DOĞRULANAMADI',errorText(error),'warn');}
+}
+async function extraImageCheck(number){
+  // Do not assume filenames; discover only image URLs actually present in live HTML.
+  const id=String(number).padStart(2,'0');
+  try{
+    const response=await extraFetch(SITE_URL+'index.html');
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const html=await response.text();
+    const urls=[...html.matchAll(/(?:["'`])([^"'`\s<>]+\.(?:jpg|jpeg|png|webp))(?:["'`])/gi)].map(m=>m[1]);
+    const matches=urls.filter(url=>new RegExp('(?:^|[^0-9])'+id+'(?:[^0-9]|$)').test(url));
+    if(!matches.length){card('extra-results','Fotoğraf '+id,'DOSYA YOLU BULUNAMADI','Canlı HTML kaynaklarında bu numarayla eşleşen görsel adresi yok.','warn');return;}
+    const path=matches[0];
+    const url=new URL(path,SITE_URL);
+    if(url.origin!==new URL(SITE_URL).origin){card('extra-results','Fotoğraf '+id,'HARİCİ KAYNAK','Görsel farklı kaynaktan yükleniyor.','warn');return;}
+    const imageResponse=await extraFetch(url.href);
+    const type=imageResponse.headers.get('content-type')||'';
+    const valid=imageResponse.ok&&type.startsWith('image/');
+    card('extra-results','Fotoğraf '+id,valid?'ERİŞİLEBİLİR':'HATA',`HTTP ${imageResponse.status}; ${type}; ${path}`,valid?'ok':'fail');
+  }catch(error){card('extra-results','Fotoğraf '+id,'DOĞRULANAMADI',errorText(error),'warn');}
+}
+async function extraChecks(){
+  const {data:{session}}=await db.auth.getSession();
+  card('extra-results','Oturum bitiş zamanı',session?.expires_at?'MEVCUT':'DOĞRULANAMADI',session?.expires_at?new Date(session.expires_at*1000).toLocaleString('tr-TR'):'Oturum bitiş zamanı alınamadı.',session?.expires_at?'ok':'warn');
+  for(const [name,path,expected] of [
+    ['Ana sayfa','index.html','Limon'],['Yönetici paneli','admin.html','Limon'],
+    ['Gizlilik sayfası','gizlilik.html',''],['404 sayfası','404.html',''],
+    ['robots.txt','robots.txt',''],['sitemap.xml','sitemap.xml','']
+  ])await extraPageCheck(name,path,expected);
+  await extraMetadataCheck();
+  for(const number of [1,2,3,4,5,7,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25])await extraImageCheck(number);
+  card('extra-results','Sunucu güvenlik olayları','VERİ KAYNAĞI BAĞLI DEĞİL','Auth başarısız girişleri, WAF ve IP olayları istemciden güvenilir biçimde sorgulanamaz.','warn');
+  card('extra-results','Gerçek cihaz ve erişilebilirlik','MANUEL TEST GEREKLİ','iPhone Safari, Android Chrome, klavye ve ekran okuyucu testleri ayrıca yapılmalıdır.','warn');
+}
+
+async function runAudit({silentIfUnauthenticated=false}={}){
+  if(running)return;
+  running=true;
+  const run=++authGeneration;
+  $('run-audit').disabled=true;
+  $('message').textContent='Yönetici yetkisi doğrulanıyor...';
+  clearResults();
+  let user=null;
+  let authorizationComplete=false;
+
+  try{
+    const {data:userData,error:userError}=await db.auth.getUser();
+    if(run!==authGeneration)return;
+    user=userData?.user||null;
+    if(!user){hideDashboard(silentIfUnauthenticated?'':userError?errorText(userError):'Yönetici oturumu bulunamadı.');return;}
+    if(userError)throw userError;
+
+    const {data:adminRow,error:adminError}=await db
+      .from('limon_admins')
+      .select('user_id')
+      .eq('user_id',user.id)
+      .maybeSingle();
+    if(run!==authGeneration)return;
+    if(adminError)throw adminError;
+    if(!adminRow){hideDashboard('Yönetici yetkisi doğrulanamadı.');void db.auth.signOut();return;}
+
+    verifiedUserId=user.id;
+    authorizationComplete=true;
+    $('login-panel').classList.add('hidden');
+    $('dashboard').classList.remove('hidden');
+    $('session-status').textContent='OTURUM AÇIK';
+    $('session-status').className='status ok';
+    $('user-email').textContent=user.email||'';
+    $('admin-status').textContent='YÖNETİCİ DOĞRULANDI';
+    $('admin-status').className='status ok';
+    $('login-message').textContent='';
+
+    log('Oturum ve yönetici üyeliği doğrulandı.');
+    await databaseChecks();
+    if(run!==authGeneration||verifiedUserId!==user.id)return;
+
+    try{
+      await securityChecks();
+    }catch(error){
+      card('security-results','Sunucu tarafı güvenlik denetimi','HATA',errorText(error),'fail');
+      log(`Güvenlik denetimi: HATA ${errorText(error)}`);
+    }
+    if(run!==authGeneration||verifiedUserId!==user.id)return;
+
+    await liveChecks();
+    if(run!==authGeneration||verifiedUserId!==user.id)return;
+    try{await extraChecks();}catch(error){
+      card('extra-results','Ek denetimler','HATA',errorText(error),'warn');
+    }
+    if(run===authGeneration&&verifiedUserId===user.id)$('message').textContent='Denetim tamamlandı. Sonuçlar aşağıda.';
+  }catch(error){
+    if(!authorizationComplete){
+      if(run===authGeneration)hideDashboard(errorText(error));
+      if(user)void db.auth.signOut();
+      return;
+    }
+    if(run!==authGeneration||verifiedUserId!==user.id)return;
+    $('message').textContent=`Denetim hatası: ${errorText(error)}`;
+    log(`GENEL HATA: ${errorText(error)}`);
+  }finally{
+    running=false;
+    $('run-audit').disabled=false;
+  }
+}
+
+async function revalidateAdminAfterRefresh(expectedUserId){
+  if(!expectedUserId||expectedUserId!==verifiedUserId)return;
+  try{
+    const {data:userData,error:userError}=await db.auth.getUser();
+    if(expectedUserId!==verifiedUserId)return;
+    const user=userData?.user;
+    if(userError||!user||user.id!==expectedUserId){hideDashboard('Oturum yenilemesinde kullanıcı doğrulanamadı.');return;}
+    const {data:adminRow,error:adminError}=await db.from('limon_admins').select('user_id').eq('user_id',expectedUserId).maybeSingle();
+    if(expectedUserId!==verifiedUserId)return;
+    if(adminError){hideDashboard('Yenileme sonrası yönetici yetkisi doğrulanamadı.');return;}
+    if(!adminRow){hideDashboard('Yönetici yetkisi kaldırılmış.');void db.auth.signOut();}
+  }catch(error){
+    if(expectedUserId===verifiedUserId)hideDashboard('Yenileme sonrası yönetici yetkisi doğrulanamadı.');
+  }
+}
+
+$('login-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  $('login-button').disabled=true;
+  $('login-message').textContent='Giriş kontrol ediliyor...';
+  try{
+    const {error}=await db.auth.signInWithPassword({
+      email:$('email').value.trim(),
+      password:$('password').value
+    });
+    if(error)throw error;
+    $('password').value='';
+    $('login-message').textContent='Yönetici yetkisi doğrulanıyor...';
+    await runAudit();
+  }catch(error){
+    hideDashboard(`Giriş başarısız: ${errorText(error)}`);
+  }finally{
+    $('login-button').disabled=false;
+  }
+});
+
+$('run-audit').addEventListener('click',()=>runAudit());
+
+$('copy-results').addEventListener('click',async()=>{
+  if(!verifiedUserId||$('dashboard').classList.contains('hidden'))return;
+  try{
+    await navigator.clipboard.writeText($('details').textContent);
+    $('message').textContent='Denetim ayrıntıları kopyalandı.';
+  }catch(error){
+    $('message').textContent='Kopyalama başarısız. Metni elle seçebilirsin.';
+  }
+});
+
+$('download-report').addEventListener('click',()=>{
+  if(!verifiedUserId||$('dashboard').classList.contains('hidden'))return;
+  const payload={generatedAt:new Date().toISOString(),results:structuredResults,notes:auditLog};
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a');link.href=url;link.download='limon-test-raporu.json';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+$('copy-summary').addEventListener('click',async()=>{
+  if(!verifiedUserId||$('dashboard').classList.contains('hidden'))return;
+  try{
+    await navigator.clipboard.writeText(structuredResults.map(x=>`${x.category} | ${x.title}: ${x.status} — ${x.detail}`).join('\n'));
+    $('message').textContent='Tüm sonuçlar kopyalandı.';
+  }catch(error){$('message').textContent='Kopyalama engellendi; JSON raporu kullanılabilir.';}
+});
+$('logout').addEventListener('click',async()=>{
+  if(running)return;
+  const {error}=await db.auth.signOut();
+  hideDashboard(error?'Oturum kapatma sırasında hata oluştu.':'Oturum kapatıldı.');
+});
+
+runAudit({silentIfUnauthenticated:true});
+
+db.auth.onAuthStateChange((event,session)=>{
+  if(event==='SIGNED_OUT'||!session){if(verifiedUserId||!$('dashboard').classList.contains('hidden'))hideDashboard();return;}
+  if(verifiedUserId&&session.user?.id!==verifiedUserId){hideDashboard('Oturum değişti; yeniden giriş yap.');return;}
+  if(event==='TOKEN_REFRESHED'&&verifiedUserId){
+    const expectedUserId=verifiedUserId;
+    setTimeout(()=>{if(!running)void revalidateAdminAfterRefresh(expectedUserId);},0);
+  }
+});
+</script>
+</body>
+</html>
